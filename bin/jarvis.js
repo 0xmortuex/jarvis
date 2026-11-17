@@ -1,12 +1,17 @@
 #!/usr/bin/env node
 import path from 'node:path';
+import readline from 'node:readline';
 import { build, homeDir, initHome } from '../src/app.js';
 import { JsonlLog } from '../src/store.js';
+import { createTelegramApi } from '../src/telegram.js';
 
 const HELP = `jarvis <command>
 
   init                          create ~/.jarvis (or $JARVIS_HOME) with a config and a token
-  run                           start the heartbeat and the local server
+  run                           start the heartbeat, the local server and the Telegram listener
+  chat                          talk to Jarvis in this terminal ("exit" to leave)
+  chat <message>                send one message and print the reply
+  telegram-id                   list the chats that wrote to your bot, to find your chat id
   signal <title> [--severity s] [--amount n] [--tag t]
                                 raise an alert through the policy
   inbox                         show unread alerts
@@ -49,12 +54,45 @@ async function main(argv) {
       const { host, port } = app.config.server;
       app.server.listen(port, host, () => process.stdout.write(`Jarvis is listening on http://${host}:${port}\n`));
       app.heartbeat.start();
+      app.telegram?.start().catch((err) => process.stderr.write(`telegram listener crashed: ${err.message}\n`));
       await app.heartbeat.beat();
       process.on('SIGINT', () => {
         app.heartbeat.stop();
+        app.telegram?.stop();
         app.server.close(() => process.exit(0));
       });
       return;
+    }
+    case 'chat': {
+      const say = (text) => app.chat.reply(text, { conversation: 'terminal' });
+      if (rest.length) return process.stdout.write(`${await say(rest.join(' '))}\n`);
+      const rl = readline.createInterface({ input: process.stdin, output: process.stdout, prompt: 'you> ' });
+      // Input can end while a reply is still being written (piped input, Ctrl+D). Lines already
+      // read are still answered, but a closed readline must not be asked to prompt again.
+      let open = true;
+      rl.once('close', () => (open = false));
+      process.stdout.write('Talking to Jarvis. Type "help" for commands, "exit" to leave.\n');
+      rl.prompt();
+      for await (const line of rl) {
+        const text = line.trim();
+        if (text === 'exit' || text === 'quit') break;
+        if (text) process.stdout.write(`jarvis> ${await say(text)}\n`);
+        if (open) rl.prompt();
+      }
+      rl.close();
+      return;
+    }
+    case 'telegram-id': {
+      // Reading without an offset leaves the messages waiting, so the listener still answers them later.
+      const updates = await createTelegramApi({ env: process.env, fetch: globalThis.fetch }).getUpdates({ timeoutSec: 0 });
+      const chats = new Map();
+      for (const u of updates) {
+        const c = u.message?.chat;
+        if (c) chats.set(c.id, c);
+      }
+      if (!chats.size) return process.stdout.write('No messages are waiting. Send your bot any message from your phone, then run this again.\n');
+      const lines = [...chats.values()].map((c) => `${c.id}  ${[c.first_name, c.last_name].filter(Boolean).join(' ') || c.title || ''}${c.username ? ` (@${c.username})` : ''}`);
+      return process.stdout.write(`${lines.join('\n')}\nPut the id of your own chat in config.json as channels.telegram.chatId.\n`);
     }
     case 'signal': {
       const severity = flag(rest, 'severity')[0];
