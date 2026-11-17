@@ -31,6 +31,16 @@ function alive(pid) {
   }
 }
 
+/** Kill a process and everything it started. A process that is already gone is not an error. */
+function killTree(pid) {
+  if (!alive(pid)) return;
+  try {
+    execFileSync('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore' });
+  } catch (err) {
+    if (alive(pid)) throw err;
+  }
+}
+
 async function until(check, ms, what) {
   const end = Date.now() + ms;
   while (Date.now() < end) {
@@ -89,7 +99,8 @@ test('autostart: the supervisor stops node when its parent process is killed, so
   const dir = tmpDir();
   const entry = path.join(dir, 'daemon.cjs');
   const pidFile = path.join(dir, 'pid.txt');
-  fs.writeFileSync(entry, "require('node:fs').writeFileSync(require('node:path').join(__dirname, 'pid.txt'), String(process.pid)); setInterval(() => {}, 1000);\n");
+  // Records its own process id and its parent's, which is the supervisor.
+  fs.writeFileSync(entry, "require('node:fs').writeFileSync(require('node:path').join(__dirname, 'pid.txt'), process.pid + ' ' + process.ppid); setInterval(() => {}, 1000);\n");
 
   // cmd.exe stands in for the task's conhost: it is the supervisor's parent, and killing it is
   // what ending the task does. Two things that cannot stand in: a node process (node kills its
@@ -99,15 +110,24 @@ test('autostart: the supervisor stops node when its parent process is killed, so
   const line = ['powershell.exe', ...PS_FLAGS, '-File', quoted(script('run-supervised.ps1')), '-Node', quoted(process.execPath), '-Entry', quoted(entry), '-RestartDelaySeconds', '1'].join(' ');
   const parent = spawn('cmd.exe', ['/d', '/s', '/c', quoted(line)], { stdio: 'ignore', windowsVerbatimArguments: true });
 
-  let daemonPid;
+  let ids;
   try {
-    daemonPid = await until(() => fs.existsSync(pidFile) && Number(fs.readFileSync(pidFile, 'utf8')), 30000, 'the supervised node to start');
-    assert.ok(alive(daemonPid));
+    ids = await until(() => {
+      if (!fs.existsSync(pidFile)) return null;
+      const [daemon, supervisor] = fs.readFileSync(pidFile, 'utf8').split(' ').map(Number);
+      return daemon > 0 && supervisor > 0 ? { daemon, supervisor } : null;
+    }, 30000, 'the supervised node to start');
+    assert.ok(alive(ids.daemon) && alive(ids.supervisor));
 
     parent.kill();
-    await until(() => !alive(daemonPid), 15000, 'the supervisor to stop node after its parent died');
+    await until(() => !alive(ids.daemon), 15000, 'the supervisor to stop node after its parent died');
+    await until(() => !alive(ids.supervisor), 15000, 'the supervisor to exit after stopping node');
   } finally {
     parent.kill();
-    if (daemonPid && alive(daemonPid)) process.kill(daemonPid);
+    // A supervisor that is still alive would start node again, so it goes first, with its children.
+    if (ids) {
+      killTree(ids.supervisor);
+      killTree(ids.daemon);
+    }
   }
 });

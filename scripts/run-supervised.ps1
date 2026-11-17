@@ -26,6 +26,11 @@ $parentId = (Get-CimInstance Win32_Process -Filter "ProcessId=$PID").ParentProce
 $parent = Get-Process -Id $parentId
 # Reading HasExited now opens a handle to the parent, so a recycled process id cannot fool the checks below.
 if ($parent.HasExited) { throw "The parent process $parentId has already exited." }
+# Before that handle was open, the parent could have exited and its id been handed to a new process.
+# A real parent always started before its child, so a process newer than this one is a stranger.
+if ($parent.StartTime -gt (Get-Process -Id $PID).StartTime) {
+  throw "The parent process $parentId exited before it could be watched."
+}
 
 while ($true) {
   $start = New-Object System.Diagnostics.ProcessStartInfo
