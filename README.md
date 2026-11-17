@@ -78,6 +78,37 @@ A public ntfy.sh topic is readable by anyone who guesses the name. Use a long ra
 `jarvis run` refuses to start on a policy that would silence alerts by mistake (unknown tier,
 bad time zone, bad pattern).
 
+### Start at logon (Windows)
+
+Run `node bin/jarvis.js init` first, then:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\install-autostart.ps1
+Start-ScheduledTask -TaskName Jarvis    # or sign out and back in
+```
+
+`scripts/install-autostart.ps1` registers a Task Scheduler task named `Jarvis` for your user. It
+does not need admin rights. The task:
+
+- runs `node bin/jarvis.js run` every time you log on, with no window (`conhost.exe --headless`)
+- starts node again 30 seconds after it exits with an error, and stops node when you end the task
+  (both done by `scripts/run-supervised.ps1`, because Task Scheduler does neither for a program
+  that exits with an error code)
+- stores the absolute paths to `node.exe` and to this repo, so run the installer again after
+  moving the repo or reinstalling Node (it replaces the old task)
+
+Check it with `Get-ScheduledTask -TaskName Jarvis`; stop it with `Stop-ScheduledTask -TaskName Jarvis`.
+The hidden task keeps no log. If the server on port 7777 does not come up, run
+`node bin/jarvis.js run` in a terminal to see the error.
+
+To stop the daemon and remove the task:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\uninstall-autostart.ps1
+```
+
+It leaves `~/.jarvis` alone.
+
 ## Using it from Vex
 
 Vex's MCP client speaks the same protocol (`2025-06-18`, JSON-RPC over HTTP).
@@ -127,7 +158,8 @@ src/llm.js           ollama + OpenAI-compatible, local-first router
 src/agent.js         tool loop with verifier gate and skill learning
 src/mcp.js           MCP tools
 src/server.js        local HTTP front door
-test/                45 tests (node --test)
+scripts/             Windows auto-start: install, uninstall, and the supervisor the task runs
+test/                51 tests (node --test); the 4 auto-start tests run on Windows only
 ```
 
 ## Not built yet
